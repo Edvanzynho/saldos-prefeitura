@@ -1,7 +1,7 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import { createRoot } from 'react-dom/client';
 import { createClient } from '@supabase/supabase-js';
-import { Plus, Search, Save, Printer, Copy, Pencil, EyeOff, Eye, Trash2, RefreshCw } from 'lucide-react';
+import { Plus, Search, Save, Printer, Copy, Pencil, EyeOff, Eye, Trash2, RefreshCw, FileText } from 'lucide-react';
 import './style.css';
 
 const supabaseUrl = import.meta.env.VITE_SUPABASE_URL;
@@ -21,8 +21,13 @@ function parseValor(valor) {
   return Number(String(valor || '0').replace(/\./g, '').replace(',', '.')) || 0;
 }
 
+function normalizar(texto) {
+  return String(texto || '').toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '');
+}
+
 function App() {
   const [titulo, setTitulo] = useState(`Saldos das Contas - ${hojeBR()}`);
+  const [subtitulo, setSubtitulo] = useState('Controle diário de saldos das contas da prefeitura');
   const [categorias, setCategorias] = useState([]);
   const [contas, setContas] = useState([]);
   const [busca, setBusca] = useState('');
@@ -31,6 +36,11 @@ function App() {
   const [editandoContaId, setEditandoContaId] = useState(null);
   const [carregando, setCarregando] = useState(false);
   const [erro, setErro] = useState('');
+
+  const [filtroBanco, setFiltroBanco] = useState('todos');
+  const [filtroCategoria, setFiltroCategoria] = useState('todos');
+  const [ordenacao, setOrdenacao] = useState('nome');
+  const [categoriaRelatorio, setCategoriaRelatorio] = useState('todas');
 
   const [formConta, setFormConta] = useState({
     banco: '',
@@ -54,15 +64,8 @@ function App() {
     }
 
     setCarregando(true);
-    const { data: cats, error: erroCats } = await supabase
-      .from('categorias')
-      .select('*')
-      .order('nome');
-
-    const { data: ctas, error: erroContas } = await supabase
-      .from('contas')
-      .select('*, categorias(nome)')
-      .order('nome');
+    const { data: cats, error: erroCats } = await supabase.from('categorias').select('*').order('nome');
+    const { data: ctas, error: erroContas } = await supabase.from('contas').select('*, categorias(nome)').order('nome');
 
     if (erroCats || erroContas) {
       setErro('Erro ao carregar dados. Confira se executou o supabase.sql.');
@@ -78,35 +81,56 @@ function App() {
 
   const categoriasAtivas = categorias.filter(c => c.ativo);
 
-  const contasFiltradas = useMemo(() => {
-    const termo = busca.toLowerCase().trim();
-    return contas
-      .filter(conta => mostrarInativas ? true : conta.ativa)
-      .filter(conta => {
-        const categoriaNome = conta.categorias?.nome || '';
-        return [conta.banco, conta.agencia, conta.conta, conta.nome, categoriaNome, conta.observacao]
-          .join(' ')
-          .toLowerCase()
-          .includes(termo);
-      });
-  }, [busca, contas, mostrarInativas]);
-
-  const totalGeral = useMemo(() => {
-    return contas.filter(c => c.ativa).reduce((soma, conta) => soma + Number(conta.saldo || 0), 0);
+  const bancos = useMemo(() => {
+    const lista = contas.filter(c => c.ativa).map(c => c.banco).filter(Boolean);
+    return [...new Set(lista)].sort((a, b) => a.localeCompare(b, 'pt-BR'));
   }, [contas]);
 
-  const totaisPorCategoria = useMemo(() => {
-    return categorias
-      .filter(cat => cat.ativo)
-      .map(cat => {
-        const lista = contas.filter(conta => conta.ativa && conta.categoria_id === cat.id);
-        return {
-          ...cat,
-          total: lista.reduce((soma, conta) => soma + Number(conta.saldo || 0), 0),
-          quantidade: lista.length
-        };
+  const contasFiltradas = useMemo(() => {
+    const termo = normalizar(busca.trim());
+
+    const filtradas = contas
+      .filter(conta => mostrarInativas ? true : conta.ativa)
+      .filter(conta => filtroBanco === 'todos' ? true : conta.banco === filtroBanco)
+      .filter(conta => filtroCategoria === 'todos' ? true : conta.categoria_id === filtroCategoria)
+      .filter(conta => {
+        const categoriaNome = conta.categorias?.nome || '';
+        return normalizar([conta.banco, conta.agencia, conta.conta, conta.nome, categoriaNome, conta.observacao].join(' ')).includes(termo);
       });
+
+    return [...filtradas].sort((a, b) => {
+      const categoriaA = a.categorias?.nome || '';
+      const categoriaB = b.categorias?.nome || '';
+      if (ordenacao === 'banco') return String(a.banco || '').localeCompare(String(b.banco || ''), 'pt-BR') || String(a.nome || '').localeCompare(String(b.nome || ''), 'pt-BR');
+      if (ordenacao === 'categoria') return categoriaA.localeCompare(categoriaB, 'pt-BR') || String(a.nome || '').localeCompare(String(b.nome || ''), 'pt-BR');
+      if (ordenacao === 'maior-saldo') return Number(b.saldo || 0) - Number(a.saldo || 0);
+      if (ordenacao === 'menor-saldo') return Number(a.saldo || 0) - Number(b.saldo || 0);
+      return String(a.nome || '').localeCompare(String(b.nome || ''), 'pt-BR');
+    });
+  }, [busca, contas, mostrarInativas, filtroBanco, filtroCategoria, ordenacao]);
+
+  const totalGeral = useMemo(() => contas.filter(c => c.ativa).reduce((soma, conta) => soma + Number(conta.saldo || 0), 0), [contas]);
+
+  const totaisPorCategoria = useMemo(() => {
+    return categorias.filter(cat => cat.ativo).map(cat => {
+      const lista = contas.filter(conta => conta.ativa && conta.categoria_id === cat.id);
+      return {
+        ...cat,
+        total: lista.reduce((soma, conta) => soma + Number(conta.saldo || 0), 0),
+        quantidade: lista.length
+      };
+    });
   }, [categorias, contas]);
+
+  const contasRelatorioCategoria = useMemo(() => {
+    if (categoriaRelatorio === 'todas') return [];
+    return contas
+      .filter(conta => conta.ativa && conta.categoria_id === categoriaRelatorio)
+      .sort((a, b) => String(a.nome || '').localeCompare(String(b.nome || ''), 'pt-BR'));
+  }, [contas, categoriaRelatorio]);
+
+  const categoriaSelecionadaRelatorio = categorias.find(c => c.id === categoriaRelatorio);
+  const totalRelatorioCategoria = contasRelatorioCategoria.reduce((soma, conta) => soma + Number(conta.saldo || 0), 0);
 
   function limparFormulario() {
     setFormConta({
@@ -185,7 +209,7 @@ function App() {
   async function alternarCategoria(cat) {
     const temContaAtiva = contas.some(conta => conta.categoria_id === cat.id && conta.ativa);
     if (cat.ativo && temContaAtiva) {
-      alert('Essa categoria possui contas ativas. Inative ou altere as contas primeiro.');
+      alert('Essa categoria possui contas ativas. Para ocultar, primeiro inative ou mova as contas dessa categoria.');
       return;
     }
 
@@ -194,28 +218,89 @@ function App() {
     carregarDados();
   }
 
-  function relatorioTexto() {
-    const linhas = [];
-    linhas.push(titulo);
-    linhas.push('');
-    totaisPorCategoria.forEach(cat => {
-      linhas.push(`${cat.nome}: ${moeda(cat.total)}`);
-    });
-    linhas.push('');
-    linhas.push(`Total Geral: ${moeda(totalGeral)}`);
+  async function excluirCategoria(cat) {
+    const temConta = contas.some(conta => conta.categoria_id === cat.id);
+    if (temConta) {
+      alert('Não dá para excluir uma categoria com contas vinculadas. Mova ou inative as contas primeiro. Use ocultar quando quiser apenas tirar da tela.');
+      return;
+    }
+
+    const confirmar = confirm(`Excluir permanentemente a categoria "${cat.nome}"?`);
+    if (!confirmar) return;
+
+    const { error } = await supabase.from('categorias').delete().eq('id', cat.id);
+    if (error) return alert('Erro ao excluir categoria.');
+    carregarDados();
+  }
+
+  function relatorioTextoGeral() {
+    const linhas = [titulo, subtitulo, ''];
+    totaisPorCategoria.forEach(cat => linhas.push(`${cat.nome}: ${moeda(cat.total)}`));
+    linhas.push('', `Total Geral: ${moeda(totalGeral)}`);
     return linhas.join('\n');
   }
 
-  async function copiarRelatorio() {
-    await navigator.clipboard.writeText(relatorioTexto());
-    alert('Relatório copiado.');
+  function relatorioTextoCategoria() {
+    if (!categoriaSelecionadaRelatorio) return '';
+
+    const linhas = [`Relatório - ${categoriaSelecionadaRelatorio.nome}`, subtitulo, ''];
+
+    contasRelatorioCategoria.forEach(conta => {
+      linhas.push(`Conta: ${conta.nome}`);
+      if (conta.banco) linhas.push(`Banco: ${conta.banco}`);
+      if (conta.agencia) linhas.push(`Agência: ${conta.agencia}`);
+      if (conta.conta) linhas.push(`Número: ${conta.conta}`);
+      linhas.push(`Saldo: ${moeda(conta.saldo)}`);
+      if (conta.observacao) linhas.push(`Obs.: ${conta.observacao}`);
+      linhas.push('');
+    });
+
+    linhas.push(`Total ${categoriaSelecionadaRelatorio.nome}: ${moeda(totalRelatorioCategoria)}`);
+    return linhas.join('\n');
+  }
+
+  async function copiarRelatorioGeral() {
+    await navigator.clipboard.writeText(relatorioTextoGeral());
+    alert('Relatório geral copiado.');
+  }
+
+  async function copiarRelatorioCategoria() {
+    if (!categoriaSelecionadaRelatorio) return alert('Selecione uma categoria.');
+    await navigator.clipboard.writeText(relatorioTextoCategoria());
+    alert('Relatório da categoria copiado.');
+  }
+
+  function imprimirRelatorioCategoria() {
+    if (!categoriaSelecionadaRelatorio) {
+      alert('Selecione uma categoria.');
+      return;
+    }
+
+    const conteudo = relatorioTextoCategoria().replace(/\n/g, '<br>');
+    const janela = window.open('', '_blank');
+    janela.document.write(`
+      <html>
+        <head>
+          <title>Relatório - ${categoriaSelecionadaRelatorio.nome}</title>
+          <style>
+            body { font-family: Arial, sans-serif; padding: 24px; color: #111827; }
+            .box { font-size: 14px; line-height: 1.55; }
+          </style>
+        </head>
+        <body>
+          <div class="box">${conteudo}</div>
+          <script>window.print();</script>
+        </body>
+      </html>
+    `);
+    janela.document.close();
   }
 
   return (
     <main className="app">
       <section className="cabecalho">
         <input className="titulo" value={titulo} onChange={(e) => setTitulo(e.target.value)} />
-        <p>Controle diário de saldos das contas da prefeitura</p>
+        <input className="subtitulo" value={subtitulo} onChange={(e) => setSubtitulo(e.target.value)} />
       </section>
 
       {erro && <div className="alerta">{erro}</div>}
@@ -258,11 +343,33 @@ function App() {
             {categorias.map(cat => (
               <div className="categoria" key={cat.id}>
                 <span className={cat.ativo ? '' : 'inativo'}>{cat.nome}</span>
-                <button onClick={() => alternarCategoria(cat)}>{cat.ativo ? <EyeOff size={16} /> : <Eye size={16} />}</button>
+                <div className="acoes-categoria">
+                  <button title="Ocultar/Reativar" onClick={() => alternarCategoria(cat)}>{cat.ativo ? <EyeOff size={16} /> : <Eye size={16} />}</button>
+                  <button title="Excluir categoria" onClick={() => excluirCategoria(cat)}><Trash2 size={16} /></button>
+                </div>
               </div>
             ))}
           </div>
         </div>
+      </section>
+
+      <section className="painel no-print">
+        <h2><FileText size={20} /> Relatório por Categoria</h2>
+        <div className="relatorio-categoria">
+          <select value={categoriaRelatorio} onChange={(e) => setCategoriaRelatorio(e.target.value)}>
+            <option value="todas">Selecione uma categoria</option>
+            {categoriasAtivas.map(cat => <option key={cat.id} value={cat.id}>{cat.nome}</option>)}
+          </select>
+          <button onClick={copiarRelatorioCategoria}><Copy size={18} /> Copiar categoria</button>
+          <button className="primario" onClick={imprimirRelatorioCategoria}><Printer size={18} /> Imprimir categoria</button>
+        </div>
+        {categoriaSelecionadaRelatorio && (
+          <div className="resumo-relatorio">
+            <strong>{categoriaSelecionadaRelatorio.nome}</strong>
+            <span>{contasRelatorioCategoria.length} conta(s)</span>
+            <span>Total: {moeda(totalRelatorioCategoria)}</span>
+          </div>
+        )}
       </section>
 
       <section className="painel">
@@ -271,10 +378,29 @@ function App() {
             <Search size={18} />
             <input placeholder="Buscar conta, banco, categoria..." value={busca} onChange={(e) => setBusca(e.target.value)} />
           </div>
+
+          <select value={filtroBanco} onChange={(e) => setFiltroBanco(e.target.value)} className="select-filtro">
+            <option value="todos">Todos os bancos</option>
+            {bancos.map(banco => <option key={banco} value={banco}>{banco}</option>)}
+          </select>
+
+          <select value={filtroCategoria} onChange={(e) => setFiltroCategoria(e.target.value)} className="select-filtro">
+            <option value="todos">Todas as categorias</option>
+            {categoriasAtivas.map(cat => <option key={cat.id} value={cat.id}>{cat.nome}</option>)}
+          </select>
+
+          <select value={ordenacao} onChange={(e) => setOrdenacao(e.target.value)} className="select-filtro">
+            <option value="nome">Ordem alfabética</option>
+            <option value="banco">Banco</option>
+            <option value="categoria">Categoria</option>
+            <option value="maior-saldo">Maior saldo</option>
+            <option value="menor-saldo">Menor saldo</option>
+          </select>
+
           <button onClick={carregarDados}><RefreshCw size={18} /> Atualizar</button>
           <button onClick={() => setMostrarInativas(!mostrarInativas)}>{mostrarInativas ? 'Ocultar inativas' : 'Mostrar inativas'}</button>
-          <button onClick={copiarRelatorio}><Copy size={18} /> WhatsApp</button>
-          <button className="primario" onClick={() => window.print()}><Printer size={18} /> Imprimir/PDF</button>
+          <button onClick={copiarRelatorioGeral}><Copy size={18} /> WhatsApp geral</button>
+          <button className="primario" onClick={() => window.print()}><Printer size={18} /> Imprimir/PDF geral</button>
         </div>
 
         <div className="totais-categorias">
